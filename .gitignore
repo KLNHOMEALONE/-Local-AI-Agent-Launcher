@@ -1,0 +1,15 @@
+# Windows Junk
+Thumbs.db
+Desktop.ini
+
+# Logs and Temp files
+*.log
+*.tmp
+
+# IDE settings
+.vscode/
+.idea/
+
+# Local AI cache (if generated locally)
+*.cache/
+slot_cache/
