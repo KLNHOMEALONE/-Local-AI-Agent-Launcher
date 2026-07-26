@@ -20,11 +20,19 @@ $SlotCacheDir = "C:\LocalAI\slot_cache"
 if (!(Test-Path $SlotCacheDir)) { New-Item -ItemType Directory -Path $SlotCacheDir -Force | Out-Null }
 
 # --- 2. INTERACTIVE MODEL SELECTION ---
+# Получаем полный список без фильтрации фильтром Where-Object, чтобы индексы в массиве не сдвигались
 $ModelFiles = Get-ChildItem -Path $MODELS_DIR -Filter "*.gguf" -ErrorAction SilentlyContinue
 if ($ModelFiles.Count -eq 0) { Write-Error "Error: No .gguf models discovered inside $MODELS_DIR" }
+
 Write-Host ""
 Write-Host "=== AVAILABLE MODELS ===" -ForegroundColor Cyan
-for ($i = 0; $i -lt $ModelFiles.Count; $i++) { Write-Host "  [$($i + 1)] $($ModelFiles[$i].Name)" -ForegroundColor Yellow }
+for ($i = 0; $i -lt $ModelFiles.Count; $i++) { 
+    # Безопасное скрытие: файлы mmproj просто не выводятся на экран, но сохраняют свой оригинальный индекс
+    if ($ModelFiles[$i].Name -notlike "*mmproj*") {
+        Write-Host "  [$($i + 1)] $($ModelFiles[$i].Name)" -ForegroundColor Yellow 
+    }
+}
+
 $ModelSelection = Read-Host "`nSelect model index number"
 $SelectedModelFile = $ModelFiles[[int]$ModelSelection - 1]
 $ModelPath = $SelectedModelFile.FullName
@@ -33,12 +41,12 @@ $ModelPath = $SelectedModelFile.FullName
 $ContextSize = 131072
 
 # --- 2.5 SMART ARCHITECTURE DETECTOR & PARAMETER BINDING ---
-# ФИКС: Удалены дефисы из имён переменных. В PowerShell дефис означает вычитание ($Top - $p).
 $Temperature = "0.0"
 $TopP = "0.85" 
 $TopK = "20"
 $StopTokens = @()
 $PreserveThinking = $false  
+$MMProjPath = $null 
 
 # Дополнительные штрафы против зацикливания инструментов (по умолчанию отключены)
 $FrequencyPenalty = "0.0"
@@ -46,12 +54,17 @@ $PresencePenalty = "0.1"
 
 $ModelNameLower = $SelectedModelFile.Name.ToLower()
 
+# Назначение путей к файлам мультимодальных проекторов
+$GemmaMMProj = Join-Path $MODELS_DIR "mmproj-F16.gguf"
+
 if ($ModelNameLower -like "*gemma*") {
     $Temperature = "1.0"
-    # ФИКС: Удалены висящие запятые и лишние кавычки
     $TopP = "0.95" 
     $TopK = "64"
     $StopTokens = @("<turn|>", "<turn|user>", "<turn|model>")
+    
+    # Привязка проектора только для архитектуры Gemma 4
+    if (Test-Path $GemmaMMProj) { $MMProjPath = $GemmaMMProj }
     Write-Host ">>> Gemma 4 architecture detected. Parameters calibrated." -ForegroundColor Green
 } 
 elseif ($ModelNameLower -like "*qwopus*") {
@@ -98,8 +111,7 @@ $TargetProjectDir = $ProjectDirs[[int]$ProjectSelection - 1].FullName
 Write-Host "`n>>> Launching native OpenAI/Anthropic-compatible llama-server on port 8080..." -ForegroundColor Green
 $ServerPath = (Get-ChildItem -Path $LLAMA_DIR -Recurse -Filter "llama-server.exe" | Select-Object -First 1).FullName
 
-# Собираем базовые стабильные параметры массивом строк
-# ФИКС: Переменные изменены на новые имена без дефисов ($TopP и $TopK)
+# Собираем базовые стабильные параметры массивом строк (СТРОГО ВАШИ ИСХОДНЫЕ ФЛАГИ)
 $ServerArgs = @(
     "-m", "$ModelPath", 
     "--host", "0.0.0.0", 
@@ -126,12 +138,19 @@ $ServerArgs = @(
     "--presence-penalty", "$PresencePenalty",   
     "--special",    
     "--jinja",               
+    "--cont-batching",                  # ОСТАВЛЕН: Единственный необходимый флаг для склейки путей в пиксели
     "--pooling", "none", 
     "--slot-save-path", "$SlotCacheDir", 
     "--alias", "local_model"
 )
 
-# ФИКС: Исправлено экранирование JSON кавычек под Windows CLI
+# Инъекция мультимодального проектора (сработает ТОЛЬКО для Gemma)
+if ($null -ne $MMProjPath) {
+    $ServerArgs += "--mmproj"
+    $ServerArgs += "$MMProjPath"
+}
+
+# Оригинальное рабочее экранирование JSON кавычек
 if ($PreserveThinking) {
     $ServerArgs += "--chat-template-kwargs"
     $ServerArgs += '{\"preserve_thinking\":true}'
@@ -151,7 +170,6 @@ Start-Sleep -Seconds 12
 # --- 5. TARGET INTERACTIVE INTERFACE INVOCATION (WINDOW 2) ---
 Write-Host "`n>>> Initializing Pi Coding Agent environment in second separate window..." -ForegroundColor Green
 
-# ФИКС: Адрес полностью восстановлен до http://127.0.0.1:8080 для предотвращения падения Pi-агента [1]
 $FinalCommand = "`$env:NODE_OPTIONS='--no-warnings'; `$env:PI_API_BASE='http://127.0.0.1:8080'; `$env:PI_MODEL='local_model'; `$env:AI_FLAVOR='vanilla-json'; cd '$TargetProjectDir'; pi"
 $PiArgs = @("-NoExit", "-Command", $FinalCommand)
 
