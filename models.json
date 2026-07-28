@@ -1,0 +1,18 @@
+{
+  "providers": {
+    "lmstudio": {
+      "baseUrl": "http://localhost:8080/v1",
+      "api": "openai-completions",
+      "apiKey": "lm-studio",
+      "stream": false,
+      "models": [
+        {
+          "id": "local-coder-model",
+          "input": [
+            "text"
+          ]
+        }
+      ]
+    }
+  }
+}
