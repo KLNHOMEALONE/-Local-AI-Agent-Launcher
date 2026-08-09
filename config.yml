@@ -1,0 +1,50 @@
+# TabbyAPI configuration for local single-user use.
+# CLI args from run_local_ai_TabbyAPI.ps1 override anything set here,
+# EXCEPT model_name (the arg has a default of None, so the merger keeps this
+# unless you also remove it from this file).
+#
+# Model-specific settings (tool_format, reasoning tokens, vision, prompt
+# template) live in <model_dir>/<model>/tabby_config.yml and OVERRIDE this
+# global file when that model is loaded. See tabby_config.yml in each model
+# folder for the per-model settings. This global file only holds defaults
+# that apply if no per-model file exists.
+
+network:
+  host: 0.0.0.0
+  port: 5000
+  # Localhost only -- no API key required. DO NOT expose this port beyond 127.0.0.1
+  # if you keep this disabled.
+  disable_auth: true
+
+model:
+  model_dir: C:/ModelsExl3
+  model_name: Kwaipilot_KAT-Coder-V2.5-Dev-EXL3-4bpw
+  cache_size: 262144
+  # Default KV cache size. The launcher overwrites this in-place on every start
+  # (see Section 4 in run_local_ai_TabbyAPI.ps1) with the adaptive $ContextSize
+  # for the selected model: 262144 for KAT-Coder / Huihui / Ornith / Gemma-4,
+  # 196608 for Qwopus. This 131072 fallback only applies if TabbyAPI is launched
+  # without the script (e.g. `python main.py --config config.yml` directly).
+  log_prompt: false
+  log_generation_params: false
+  log_requests: false
+  log_chat_completion_requests: false
+
+# Force-disable built-in thinking/reasoning. Some models (Qwen3.5/3.6 MoE)
+# waste 100+ tokens on <think>...</think> preambles per response; with
+# reasoning: false the chat template can emit an empty thinking block so
+# the model skips directly to the answer. Clients (Pi) still see no
+# thinking in `content` because the parser strips it. The reasoning parser
+# in the per-model config still runs (in case the model emits reasoning
+# anyway) but `enable_thinking: false` makes the template side opt out.
+template_vars_force:
+  enable_thinking: false
+
+# Sampling fallback preset. Without this section, TabbyAPI uses no override
+# preset at all (default in config_sample.yml is `None`), which means clients
+# that don't send temperature/top_p get whatever the model/generation_config
+# defines. safe_defaults gives temperature=0.8 / top_p=0.9 fallbacks when
+# the request omits them. Pi sends its own temperature explicitly which
+# overrides the fallback.
+sampling:
+  override_preset: safe_defaults

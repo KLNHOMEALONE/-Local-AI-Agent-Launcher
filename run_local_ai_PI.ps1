@@ -46,7 +46,7 @@ $ContextSize = 131072
 # GPU layer offload. Empty = LET LLAMA AUTO-FIT to free VRAM (recommended on this build).
 # Forcing "99" makes llama abort its auto-fit and try to cram everything on the GPUs,
 # which OOMs the second card. Set a specific number only to manually cap offload.
-$GpuLayers = ""
+$GpuLayers = "99"
 
 # --- 2.5 SMART ARCHITECTURE DETECTOR & PARAMETER BINDING ---
 $Temperature = "0.0"
@@ -146,12 +146,14 @@ $ServerArgs = @(
     "-n", "-1",
     "-sm", "layer",
     "--ctx-size", "$ContextSize",
-    "-ctk", "q8_0",
-    "-ctv", "q8_0",
+    "-ctk", "q4_0",
+    "-ctv", "q4_0",
     "--no-mmap",
     "-b", "1024",
     "-ub", "512",
     "--threads", "8",
+    "--tensor-split", "45,55",
+    "--fit", "off",
     "-tb", "8",
     "-np", "1",
     "--temp", "$Temperature",
