@@ -47,8 +47,9 @@ if ($null -eq $SelectedModelFile -or $SelectedModelFile.Name -like "*mmproj*") {
 }
 $ModelPath = $SelectedModelFile.FullName
 
-# Full 128K context (required). KV cache at this size is large; auto-fit (-ngl empty
-# below) will spill some layers to CPU to make room вЂ” slower but no OOM, 128K preserved.
+# Default context size. Per-model overrides (e.g. UD-Q2_K_XL -> 256K) are applied
+# inside the architecture-detector block in section 2.5, AFTER this default is set,
+# so this value is what every model except the explicitly-listed overrides sees.
 $ContextSize = 131072
 
 # GPU layer offload. Empty = LET LLAMA AUTO-FIT to free VRAM (recommended on this build).
@@ -177,20 +178,33 @@ elseif ($ModelNameLower -like "*qwen3.8*" -or $ModelNameLower -like "*qwen3-8*")
     $ThinkingLevel     = ""   # don't pass --thinking to Pi; enable_thinking=false in section 4.5 is authoritative
     $PreserveThinking  = $false  # nothing to preserve when thinking is off; also skips the existing preserve block
     $StopTokens = @("", "")
-    # Pin Qwen3.5-4B.jinja instead of the generic Qwen3-Coder template -- both
-    # emit the same `<tool_call><function=...>` pseudo-XML that qwen3_coder.py
-    # parses, but Qwen3.5-4B.jinja is the only template in this dir that
-    # implements an explicit enable_thinking branch:
-    #   {%- if enable_thinking is defined and enable_thinking is false %}
-    #       {{- '<think>\n\n</think>\n\n' }}
-    # When we pass {"enable_thinking": false} via --chat-template-kwargs in
-    # section 4.5, the template emits an empty <think> block after "assistant\n",
-    # which trains the model to skip its deliberation preamble and start emitting
-    # the tool call (or final answer) directly. The model is otherwise free to
-    # emit <think>...</think> on its own (its SFT data includes them); without
-    # this template+kwarg combo, the pre-MTP "thinking tokens" come right back.
-    $ChatTemplatePath = Join-Path $LLAMA_DIR "models\templates\Qwen3.5-4B.jinja"
-    Write-Host ">>> Qwen3.8 detected. Unsloth-recommended sampler: temp=1.0 top_p=0.95 top_k=20 min_p=0.0 + thinking OFF (Qwen3.5-4B chat template + enable_thinking=false via chat-template-kwargs) + MTP draft + DRY anti-loop." -ForegroundColor Magenta
+    # UD-Q2_K_XL is small enough (weights ~13-14GB fit on one 16GB card) to run 256K
+    # context comfortably with the default q4_0 KV cache + tensor-split 45,55 across
+    # 2x16GB = 32GB total. Heavier Qwen3.8 quants (Q5_K_M etc.) are ~17-18GB and don't
+    # leave enough VRAM headroom for 256K KV, so they keep the 128K default. Override
+    # here is INTENTIONAL -- only this exact quant family gets the 256K bump.
+    if ($ModelNameLower -like "*ud-q2_k_xl*") {
+        $ContextSize = 262144
+        Write-Host ">>> Qwen3.8 UD-Q2_K_XL detected: extending context to 256K (fits in 2x16GB with q4_0 KV @ tensor-split 45,55)." -ForegroundColor Magenta
+    }
+    # Pin the community-forked qwen3.8-medium-fixed.jinja (lives outside $LLAMA_DIR on
+    # purpose -- fork is local, not part of llama.cpp upstream). Three reasons over the
+    # stock Qwen3.5-4B.jinja: (1) three reasoning branches (xhigh/medium/low) so Pi's
+    # reasoning_effort maps 1-to-1 onto them and the user can switch effort in the UI;
+    # (2) also handles enable_thinking:false so Pi can still flip thinking off entirely;
+    # (3) merges system+developer roles + Unsloth developer-role fix (footer line).
+    # Template accepts BOTH enable_thinking (bool) and reasoning_effort (xhigh/medium/
+    # low, with 'high' aliased to xhigh) -- no --chat-template-kwargs at launch time,
+    # per-request chat completion from Pi carries them. Llama-server's --reasoning
+    # flag is left unset (see section 4.5) so the kwarg actually reaches the template.
+    # (Old stock-Qwen3.5-4B comment block removed -- it documented the previous
+    #  enable_thinking on/off-only behaviour, which is no longer the model here.)
+    #
+    # (Historical note for grep: the qwen3_coder.py parser still works because the
+    # fork keeps the same pseudo-XML emit format -- only the reasoning-instructions
+    # branch was added, the tag-wrapping logic is unchanged.)
+    $ChatTemplatePath = "C:\LocalAI\chat_templates\qwen3.8-medium-fixed.jinja"
+    Write-Host ">>> Qwen3.8 detected. Unsloth-recommended sampler: temp=1.0 top_p=0.95 top_k=20 min_p=0.0 + MTP draft + DRY anti-loop + qwen3.8-medium-fixed.jinja (xhigh/medium/low branches; thinking delegated to per-request reasoning_effort, Pi UI controls level at runtime)." -ForegroundColor Magenta
 }
 elseif ($ModelNameLower -like "*qwen*") {
     $Temperature = "0.6"; $TopP = "0.95"; $TopK = "20"   # Qwen official; 1.0 caused char-level typos
@@ -343,13 +357,14 @@ Write-Host ">>> Configure your client with these stop tokens: $($StopTokens -joi
 #      for Qwen3-Next MTP heads; deeper drafts don't improve acceptance rate
 #      but add latency per rejected token.
 #   3. Inject enable_thinking:false via --chat-template-kwargs. This pairs
-#      with the Qwen3.5-4B.jinja template pinned in section 2.5 (NOT the generic
-#      Qwen3-Coder.jinja used by the other Qwen branches) -- that template has
-#      the only `{%- if enable_thinking is defined and enable_thinking is false
-#      %}{{ '<think>\n\n</think>\n\n' }}` branch in the templates dir. Earlier
-#      attempt with Qwen3-Coder.jinja + enable_thinking:false was a no-op (the
-#      template didn't reference the kwarg) and the model kept emitting
-#      <think>...</think> blocks anyway.
+#      with the qwen3.8-medium-fixed.jinja pinned in section 2.5 (the community
+#      fork at C:\LocalAI\chat_templates\, NOT the stock Qwen3.5-4B.jinja or the
+#      generic Qwen3-Coder.jinja used by the other Qwen branches) -- the fork has
+#      three reasoning-effort branches (xhigh/medium/low) AND the
+#      `{%- if enable_thinking is defined and enable_thinking is false
+#      %}{{ '<think>\n\n</think>\n\n' }}` branch. Earlier attempt with the stock
+#      Qwen3-Coder.jinja + enable_thinking:false was a no-op (the template didn't
+#      reference the kwarg) and the model kept emitting <think>...</think> blocks.
 #
 # Effects verified:
 #   * Generation speed ~1.5x (the speedup that tipped us off).
@@ -365,23 +380,21 @@ if ($ModelNameLower -like "*qwen3.8*" -or $ModelNameLower -like "*qwen3-8*") {
     }
     $ServerArgs += "--spec-type";        $ServerArgs += "draft-mtp"
     $ServerArgs += "--spec-draft-n-max";  $ServerArgs += "4"
-    # Disable thinking at the server level via --reasoning off (the clean flag,
-    # no JSON quoting involved). Previous attempt with --chat-template-kwargs
-    # '{"enable_thinking":false}' crashed llama.cpp: PowerShell's Start-Process
+    # Intentionally NOT passing --reasoning off anymore. Server-side --reasoning
+    # overrides per-request thinking parameters, which blocks Pi UI from changing
+    # the thinking level on the fly. Previous attempt with --chat-template-kwargs
+    # '{"enable_thinking":false}' crashed llama.cpp (PowerShell's Start-Process
     # -ArgumentList re-balances the inner " characters when joining the array
     # into the Win32 command line, so llama.cpp receives `{enable_thinking:false}`
-    # (no quotes) and the JSON parser throws at column 2. --reasoning off is a
-    # plain string flag, no quoting path involved. It maps to LLAMA_ARG_REASONING
-    # in the server and short-circuits before the chat template renders the
-    # prompt, so the Qwen3.5-4B template's {% if enable_thinking is defined and
-    # enable_thinking is false %} branch is never reached -- the server simply
-    # skips thinking entirely.
+    # (no quotes) and the JSON parser throws at column 2). Per-request control
+    # sidesteps that quoting path entirely -- thinking kwarg arrives in the JSON
+    # body of the chat completion request, where PowerShell isn't involved.
+    # If the build supports --reasoning, we LOG its presence but leave it unset
+    # so the qwen3.8-medium-fixed.jinja template can render the right branch.
     if ($HelpText -match "(^|\s)--reasoning(\s|\[|,|$)") {
-        $ServerArgs += "--reasoning"; $ServerArgs += "off"
-    } else {
-        Write-Host ">>> WARNING: build lacks --reasoning; Qwen3.8 will keep generating <think>...</think> blocks." -ForegroundColor Yellow
+        Write-Host ">>> Build supports --reasoning; leaving it UNSET so Pi UI's per-request reasoning_effort / enable_thinking reaches the template." -ForegroundColor DarkGreen
     }
-    Write-Host ">>> Qwen3.8 overrides applied: --min-p 0.0, --spec-type draft-mtp --spec-draft-n-max 4, --reasoning off (thinking disabled server-side)" -ForegroundColor DarkGreen
+    Write-Host ">>> Qwen3.8 overrides applied: --min-p 0.0, --spec-type draft-mtp --spec-draft-n-max 4, thinking delegated to per-request chat_template_kwargs (server no longer overrides)" -ForegroundColor DarkGreen
 }
 
 Start-Process -FilePath "$ServerPath" -ArgumentList $ServerArgs -WindowStyle Normal
@@ -466,6 +479,52 @@ if (Test-Path $PiSettingsPath) {
             (New-Object System.Text.UTF8Encoding $false))
     }
     Write-Host "    settings.json -> defaultProvider=lmstudio, defaultModel=local-coder-model" -ForegroundColor Green
+
+    # Patch models.json: set thinkingLevelMap on the local-coder-model entry so Pi
+    # UI selection drives the wire value (chat_template_kwargs.reasoning_effort)
+    # 1-to-1. Without this, Pi's UI choice is purely cosmetic -- the server never
+    # receives the per-request kwarg, the forked template (qwen3.8-medium-fixed.jinja,
+    # pinned in section 2.5) falls through to its default branch (xhigh), and the
+    # model hacks at max reasoning regardless of what the user picks in the UI.
+    # Literal 1-to-1 map per the design intent documented at lines 192-207. Same
+    # UTF-8-no-BOM write discipline as settings.json above (Pi's JSON parser
+    # rejects BOM-prefixed files).
+    $PiModelsPath = "$env:USERPROFILE/.pi/agent/models.json"
+    if (Test-Path $PiModelsPath) {
+        $ModelsJson  = Get-Content $PiModelsPath -Raw | ConvertFrom-Json
+        $LmProvider  = $ModelsJson.providers.lmstudio
+        if ($LmProvider -and $LmProvider.models) {
+            $TargetEntry = $null
+            foreach ($M in $LmProvider.models) {
+                if ($M.id -eq "local-coder-model") { $TargetEntry = $M; break }
+            }
+            if ($TargetEntry) {
+                $Map = [ordered]@{
+                    off     = $null
+                    minimal = "low"
+                    low     = "low"
+                    medium  = "medium"
+                    high    = "xhigh"
+                    xhigh   = "xhigh"
+                }
+                # -Force overwrites the property if it already exists, so this is
+                # idempotent across relaunches -- map stays in sync with launcher's
+                # intent even if the user hand-edits models.json between runs.
+                $TargetEntry | Add-Member -NotePropertyName "thinkingLevelMap" -NotePropertyValue $Map -Force
+                $ModelsJson | ConvertTo-Json -Depth 10 | ForEach-Object {
+                    [System.IO.File]::WriteAllText($PiModelsPath, $_,
+                        (New-Object System.Text.UTF8Encoding $false))
+                }
+                Write-Host "    models.json -> local-coder-model.thinkingLevelMap set (literal 1-to-1: off=null, minimal/low=low, medium=medium, high/xhigh=xhigh)" -ForegroundColor Green
+            } else {
+                Write-Host "    models.json -> local-coder-model entry not found under lmstudio provider; skipping thinkingLevelMap patch" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "    models.json -> lmstudio provider or its models[] missing; skipping thinkingLevelMap patch" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "    models.json not found at $PiModelsPath; skipping thinkingLevelMap patch" -ForegroundColor Yellow
+    }
 }
 
 # --- 7. TARGET INTERACTIVE INTERFACE INVOCATION (WINDOW 2) ---

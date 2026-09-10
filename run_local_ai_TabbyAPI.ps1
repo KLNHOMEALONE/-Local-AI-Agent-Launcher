@@ -98,6 +98,7 @@ if (-not $HasConfig -and -not $HasWeights) {
 $ModelContextMap = @{
     "Kwaipilot_KAT-Coder-V2.5-Dev-EXL3-4bpw"        = 262144   # 256K -- 1.25 GB Q4 cache
     "Huihui-Qwen3.6-35B-A3B-abliterated-exl3-4.5bpw" = 262144   # 256K -- 1.25 GB Q4 cache
+    "Ornith-1.5-35B-A3B-EXL3-4bpw"                   = 262144   # 256K -- 1.25 GB Q4 cache; 3113 mtp.* tensors verified (real MTP head)
     "Ornith-1.0-35B-EXL3-4.0bpw"                     = 262144   # 256K -- 1.25 GB Q4 cache
     "Qwopus3.6-27B-v2-exl3-6.00bpw"                  = 196608   # 192K -- 4 GB Q4 cache, headroom for 6bpw weights
     "Gemma-4-26B-A4B-it-exl3-5.10bpw"                = 262144   # 256K -- 2.5 GB Q4 cache (sliding window 1024)
